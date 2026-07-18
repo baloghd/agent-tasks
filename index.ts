@@ -1,0 +1,153 @@
+/**
+ * agent-tasks - git-friendly task tracker for parallel pi agents.
+ *
+ * Tasks are plain markdown in tasks/{open,claimed,done}/, committed to git.
+ * Status = directory. Claim = atomic rename, so two agents can't take the
+ * same task. The standing rules below ride in the system prompt via
+ * promptGuidelines, so they survive compaction and need no AGENTS.md.
+ *
+ * Install: copy this directory to .pi/extensions/agent-tasks/ (per project,
+ * commit it) or ~/.pi/agent/extensions/agent-tasks/ (global). Auto-discovered.
+ */
+import { StringEnum } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
+import { matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import * as core from "./core.ts";
+
+const TaskParams = Type.Object({
+	action: StringEnum(["list", "new", "claim", "drop", "done", "show"] as const),
+	id: Type.Optional(Type.Number({ description: "Task id (claim, drop, done, show)" })),
+	title: Type.Optional(Type.String({ description: "Task title (new)" })),
+	why: Type.Optional(Type.String({ description: "Context for a cold agent: why this matters, file pointers (new)" })),
+	deps: Type.Optional(Type.Array(Type.Number(), { description: "Ids of related/overlapping tasks (new)" })),
+	status: Type.Optional(StringEnum(["open", "claimed", "done"] as const)),
+	agent: Type.Optional(Type.String({ description: "Your unique handle. Defaults to your session id." })),
+});
+
+function need(id: number | undefined): number {
+	if (id === undefined) throw new Error("id required");
+	return id;
+}
+
+function fmt(t: core.Task): string {
+	const who = t.claimedBy ? ` [${t.claimedBy}]` : "";
+	const deps = t.deps.length ? ` deps:[${t.deps.join(",")}]` : "";
+	return `${t.status.padEnd(8)} #${t.id} ${t.title}${who}${deps}`;
+}
+
+export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "task",
+		label: "Task",
+		description:
+			"Manage project tasks: git-committed markdown files in tasks/, shared by every agent working this repo. " +
+			"Status is the directory (open/claimed/done); claiming is atomic, so parallel agents cannot take the same task. " +
+			"Actions: list (status?), new (title, why?, deps?), claim (id, agent?), drop (id, agent?), done (id, agent?), show (id).",
+		promptSnippet: "Track and claim project tasks in tasks/ (git-committed, shared across agents)",
+		promptGuidelines: [
+			"Use the task tool with action list at session start and before starting new work; tasks/ is the shared board for every agent on this repo.",
+			"Claim before you work: task action=claim with your handle. Never start or edit a task claimed by another agent; pick a different one or create a new one.",
+			'Before recommending follow-up work to the user, create each item with task action=new and present the ids. Never ask "should I do a, b or c?" without one task per option.',
+			"When follow-ups overlap, pass the overlapping ids as deps to task action=new and explain the overlap in why, so nobody redoes it.",
+			"Write task why/acceptance for a cold reader: another agent must be able to pick the task up with zero chat history.",
+			"If scope grows mid-task, create the extra work with task action=new instead of silently expanding the current task.",
+			"Finish with task action=done and reference the task id in your commit message.",
+		],
+		parameters: TaskParams,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const agent = params.agent ?? ctx.sessionManager.getSessionId().slice(0, 8);
+			try {
+				switch (params.action) {
+					case "list": {
+						const tasks = core.list(ctx.cwd, params.status);
+						const text = tasks.length ? tasks.map(fmt).join("\n") : "No tasks. Create one with task action=new.";
+						return { content: [{ type: "text", text }] };
+					}
+					case "new": {
+						if (!params.title) throw new Error("title required for new");
+						const t = core.create(ctx.cwd, params.title, params.why ?? "", params.deps ?? []);
+						return {
+							content: [
+								{ type: "text", text: `Created #${t.id} (${t.file}). Edit ${t.path} to flesh out Why/Acceptance.` },
+							],
+						};
+					}
+					case "claim": {
+						const t = core.claim(ctx.cwd, need(params.id), agent);
+						return { content: [{ type: "text", text: `Claimed #${t.id} for ${agent}` }] };
+					}
+					case "drop": {
+						const t = core.drop(ctx.cwd, need(params.id), agent);
+						return { content: [{ type: "text", text: `Dropped #${t.id} back to open` }] };
+					}
+					case "done": {
+						const t = core.done(ctx.cwd, need(params.id), agent);
+						return { content: [{ type: "text", text: `#${t.id} done` }] };
+					}
+					case "show":
+						return { content: [{ type: "text", text: core.show(ctx.cwd, need(params.id)) }] };
+				}
+			} catch (e: any) {
+				return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
+			}
+		},
+	});
+
+	// /tasks - the board, for the human coordinating parallel agents.
+	pi.registerCommand("tasks", {
+		description: "Show the task board (open / claimed / done)",
+		handler: async (_args, ctx) => {
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("/tasks requires interactive mode", "error");
+				return;
+			}
+			const tasks = core.list(ctx.cwd);
+			await ctx.ui.custom<void>((_tui, theme, _kb, done) => new BoardComponent(tasks, theme, done));
+		},
+	});
+}
+
+class BoardComponent {
+	private tasks: core.Task[];
+	private theme: Theme;
+	private onClose: () => void;
+
+	constructor(tasks: core.Task[], theme: Theme, onClose: () => void) {
+		this.tasks = tasks;
+		this.theme = theme;
+		this.onClose = onClose;
+	}
+
+	handleInput(data: string): void {
+		if (matchesKey(data, "escape") || matchesKey(data, "ctrl+c")) this.onClose();
+	}
+
+	render(width: number): string[] {
+		const th = this.theme;
+		const lines: string[] = ["", ` ${th.fg("accent", th.bold(" Tasks "))}`, ""];
+		if (this.tasks.length === 0) {
+			lines.push(`  ${th.fg("dim", "No tasks yet. The agent creates them with the task tool.")}`);
+		} else {
+			for (const status of core.DIRS) {
+				const group = this.tasks.filter((t) => t.status === status);
+				if (group.length === 0) continue;
+				lines.push(` ${th.fg("muted", status.toUpperCase())}`);
+				for (const t of group) {
+					let line = `  ${th.fg("accent", `#${t.id}`)} ${t.title}`;
+					if (t.claimedBy) {
+						const ageH = t.claimedAt ? Math.max(0, Math.round((Date.now() - Date.parse(t.claimedAt)) / 360000) / 10) : 0;
+						line += th.fg("muted", ` [${t.claimedBy}, ${ageH}h]`);
+					}
+					if (t.deps.length) line += th.fg("dim", ` deps:[${t.deps.join(",")}]`);
+					lines.push(line);
+				}
+				lines.push("");
+			}
+		}
+		lines.push(`  ${th.fg("dim", "Files: tasks/{open,claimed,done}/ - escape to close")}`, "");
+		return lines.map((l) => truncateToWidth(l, width));
+	}
+
+	invalidate(): void {}
+}
