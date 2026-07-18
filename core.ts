@@ -103,11 +103,11 @@ function stamp(path: string, fields: Record<string, string>): void {
 	writeFileSync(path, text);
 }
 
-export function create(root: string, title: string, why: string, deps: number[], epic = ""): Task {
+export function create(root: string, title: string, why: string, deps: number[], epic = "", acceptance = ""): Task {
 	ensure(root);
 	const used = list(root).map((t) => parseInt(t.id, 10));
 	let nid = used.length ? Math.max(...used) + 1 : 1;
-	const text = `---\ntitle: ${title}\nclaimed_by: \nclaimed_at: \ndeps: [${deps.join(", ")}]\nepic: ${epic}\ncreated: ${new Date().toISOString()}\n---\n\n## Why\n\n${why}\n\n## Acceptance\n\n- [ ] \n`;
+	const text = `---\ntitle: ${title}\nclaimed_by: \nclaimed_at: \ndeps: [${deps.join(", ")}]\nepic: ${epic}\ncreated: ${new Date().toISOString()}\n---\n\n## Why\n\n${why}\n\n## Acceptance\n\n${acceptance || "- [ ] "}\n`;
 	// ponytail: O_EXCL create is the id race control; a losing racer just bumps.
 	while (true) {
 		const path = join(root, ROOT, "open", `${String(nid).padStart(3, "0")}-${slug(title)}.md`);

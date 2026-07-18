@@ -21,6 +21,7 @@ const TaskParams = Type.Object({
 	why: Type.Optional(Type.String({ description: "Context for a cold agent: why this matters, file pointers (new)" })),
 	deps: Type.Optional(Type.Array(Type.Number(), { description: "Ids of related/overlapping tasks (new)" })),
 	epic: Type.Optional(Type.String({ description: "Epic/initiative name (new); filter by epic when list; * with list shows all epics" })),
+	acceptance: Type.Optional(Type.String({ description: "Done criteria, one per line or as markdown checklist (new)" })),
 	status: Type.Optional(StringEnum(["open", "claimed", "done"] as const)),
 	agent: Type.Optional(Type.String({ description: "Your unique handle. Defaults to your session id." })),
 });
@@ -44,7 +45,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Manage project tasks: git-committed markdown files in tasks/, shared by every agent working this repo. " +
 			"Status is the directory (open/claimed/done); claiming is atomic, so parallel agents cannot take the same task. " +
-			"Actions: list (status?, epic?), new (title, why?, deps?, epic?), claim (id, agent?), drop (id, agent?), done (id, agent?), show (id), epics. " +
+			"Actions: list (status?, epic?), new (title, why?, deps?, epic?, acceptance?), claim (id, agent?), drop (id, agent?), done (id, agent?), show (id), epics. " +
 			"Epics: use epic=NAME on any task to group it; list epic=* shows all epics with counts.",
 		promptSnippet: "Track and claim project tasks in tasks/ (git-committed, shared across agents)",
 		promptGuidelines: [
@@ -53,7 +54,7 @@ export default function (pi: ExtensionAPI) {
 			'Before recommending follow-up work to the user, create each item with task action=new and present the ids. Never ask "should I do a, b or c?" without one task per option.',
 			"When follow-ups overlap, pass the overlapping ids as deps to task action=new and explain the overlap in why, so nobody redoes it.",
 			"Group related tasks under an epic: task action=new with epic=NAME for the parent initiative, then epic=NAME on child tasks. Use task action=epics to see all groups.",
-			"Write task why/acceptance for a cold reader: another agent must be able to pick the task up with zero chat history.",
+			"Write task why/acceptance for a cold reader: another agent must be able to pick the task up with zero chat history. When porting from an existing document, include the concrete acceptance criteria in the acceptance param.",
 			"If scope grows mid-task, create the extra work with task action=new instead of silently expanding the current task.",
 			"Finish with task action=done and reference the task id in your commit message.",
 		],
@@ -71,12 +72,12 @@ export default function (pi: ExtensionAPI) {
 					}
 					case "new": {
 						if (!params.title) throw new Error("title required for new");
-						const t = core.create(ctx.cwd, params.title, params.why ?? "", params.deps ?? [], params.epic ?? "");
+						const t = core.create(ctx.cwd, params.title, params.why ?? "", params.deps ?? [], params.epic ?? "", params.acceptance ?? "");
 						return {
 							content: [
 								{
 									type: "text",
-									text: `Created #${t.id} (${t.file}). Edit ${t.path} to flesh out Why/Acceptance.`,
+									text: `Created #${t.id} (${t.file}). Why ${params.why ? "set" : "empty"}, acceptance ${params.acceptance ? "set" : "empty"}.`,
 								},
 							],
 						};
