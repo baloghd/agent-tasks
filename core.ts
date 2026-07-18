@@ -138,6 +138,7 @@ export function claim(root: string, id: number, agent: string): Task {
 	// ponytail: one active claim per agent, enforced; delete this check if it gets in the way.
 	const held = list(root, "claimed").find((x) => x.claimedBy === agent);
 	if (held) throw new Error(`${agent} already holds #${held.id} - drop or finish it first`);
+	ensure(root); // ponytail: guarantee tasks/claimed/ exists before rename
 	let out: Task;
 	try {
 		out = move(t, "claimed");
@@ -152,6 +153,7 @@ export function drop(root: string, id: number, agent: string): Task {
 	const t = find(root, id);
 	if (t.status !== "claimed") throw new Error(`#${t.id} is not claimed`);
 	if (t.claimedBy && t.claimedBy !== agent) throw new Error(`#${t.id} is claimed by ${t.claimedBy}, not ${agent}`);
+	ensure(root); // ponytail: guarantee tasks/open/ exists before rename
 	const out = move(t, "open");
 	stamp(out.path, { claimed_by: "", claimed_at: "" });
 	return parse(out.path, "open");
@@ -162,6 +164,7 @@ export function done(root: string, id: number, agent: string): Task {
 	if (t.status === "done") throw new Error(`#${t.id} already done`);
 	if (t.status === "claimed" && t.claimedBy && t.claimedBy !== agent)
 		throw new Error(`#${t.id} is claimed by ${t.claimedBy}, not ${agent}`);
+	ensure(root); // ponytail: guarantee tasks/done/ exists before rename
 	return move(t, "done");
 }
 
