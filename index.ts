@@ -128,6 +128,14 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
+const statusRank: Record<core.Status, number> = { open: 0, claimed: 1, done: 2 };
+function taskSort(tasks: core.Task[]): core.Task[] {
+	return [...tasks].sort((a, b) => {
+		const r = statusRank[a.status] - statusRank[b.status];
+		return r !== 0 ? r : parseInt(a.id, 10) - parseInt(b.id, 10);
+	});
+}
+
 class BoardComponent {
 	private tasks: core.Task[];
 	private theme: Theme;
@@ -149,27 +157,47 @@ class BoardComponent {
 		if (this.tasks.length === 0) {
 			lines.push(`  ${th.fg("dim", "No tasks yet. The agent creates them with the task tool.")}`);
 		} else {
-			for (const status of core.DIRS) {
-				const group = this.tasks.filter((t) => t.status === status);
-				if (group.length === 0) continue;
-				lines.push(` ${th.fg("muted", status.toUpperCase())}`);
-				for (const t of group) {
-					let line = `  ${th.fg("accent", `#${t.id}`)} ${t.title}`;
-					if (t.epic) line += th.fg("dim", ` (${t.epic})`);
-					if (t.claimedBy) {
-						const ageH = t.claimedAt
-							? Math.max(0, Math.round((Date.now() - Date.parse(t.claimedAt)) / 360000) / 10)
-							: 0;
-						line += th.fg("muted", ` [${t.claimedBy}, ${ageH}h]`);
-					}
-					if (t.deps.length) line += th.fg("dim", ` deps:[${t.deps.join(",")}]`);
-					lines.push(line);
+			// group by epic, ungrouped at the end
+			const byEpic = new Map<string, core.Task[]>();
+			const noEpic: core.Task[] = [];
+			for (const t of this.tasks) {
+				if (t.epic) {
+					const g = byEpic.get(t.epic) ?? [];
+					g.push(t);
+					byEpic.set(t.epic, g);
+				} else {
+					noEpic.push(t);
 				}
+			}
+			for (const name of [...byEpic.keys()].sort()) {
+				const tasks = byEpic.get(name)!;
+				lines.push(` ${th.fg("accent", name)}  ${th.fg("dim", `${tasks.length} tasks`)}`);
+				for (const t of taskSort(tasks)) lines.push(this.taskLine(t, width));
+				lines.push("");
+			}
+			if (noEpic.length) {
+				lines.push(` ${th.fg("muted", "UNGROUPED")}`);
+				for (const t of taskSort(noEpic)) lines.push(this.taskLine(t, width));
 				lines.push("");
 			}
 		}
 		lines.push(`  ${th.fg("dim", "Files: tasks/{open,claimed,done}/ - escape to close")}`, "");
 		return lines.map((l) => truncateToWidth(l, width));
+	}
+
+	private taskLine(t: core.Task, width: number): string {
+		const th = this.theme;
+		const icon = t.status === "claimed" ? "→" : t.status === "done" ? "✓" : "○";
+		const iconColor = t.status === "done" ? "dim" : t.status === "claimed" ? "accent" : "text";
+		let line = `  ${th.fg(iconColor, icon)} ${th.fg("accent", `#${t.id}`)} ${t.title}`;
+		if (t.claimedBy) {
+			const ageH = t.claimedAt
+				? Math.max(0, Math.round((Date.now() - Date.parse(t.claimedAt)) / 360000) / 10)
+				: 0;
+			line += th.fg("muted", ` [${t.claimedBy}, ${ageH}h]`);
+		}
+		if (t.deps.length) line += th.fg("dim", ` deps:[${t.deps.join(",")}]`);
+		return line;
 	}
 
 	invalidate(): void {}
