@@ -2,6 +2,7 @@
   "name": "agent-tasks",
   "version": "1.0.0",
   "description": "File-based task tracker for parallel pi agents. Tasks are plain markdown in tasks/{open,claimed,done}/; claiming is an atomic rename.",
+  "type": "module",
   "keywords": ["pi-package", "tasks", "project-management", "agent-tools"],
   "pi": {
     "extensions": ["./index.ts"]

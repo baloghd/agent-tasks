@@ -17,6 +17,7 @@ export interface Task {
 	status: Status;
 	path: string;
 	title: string;
+	epic: string;
 	claimedBy: string;
 	claimedAt: string;
 	deps: string[];
@@ -53,6 +54,7 @@ export function parse(path: string, status: Status): Task {
 		status,
 		path,
 		title: field(fm, "title"),
+		epic: field(fm, "epic"),
 		claimedBy: field(fm, "claimed_by"),
 		claimedAt: field(fm, "claimed_at"),
 		deps,
@@ -60,7 +62,7 @@ export function parse(path: string, status: Status): Task {
 	};
 }
 
-export function list(root: string, status?: Status): Task[] {
+export function list(root: string, status?: Status, epic?: string): Task[] {
 	const dirs: Status[] = status ? [status] : [...DIRS];
 	const out: Task[] = [];
 	for (const d of dirs) {
@@ -70,7 +72,21 @@ export function list(root: string, status?: Status): Task[] {
 			if (f.endsWith(".md")) out.push(parse(join(dir, f), d));
 		}
 	}
-	return out;
+	return epic && epic !== "*" ? out.filter((t) => t.epic === epic) : out;
+}
+
+export function epics(root: string): { name: string; count: number; claimed: number; done: number }[] {
+	const all = list(root);
+	const map = new Map<string, { count: number; claimed: number; done: number }>();
+	for (const t of all) {
+		if (!t.epic) continue;
+		const e = map.get(t.epic) ?? { count: 0, claimed: 0, done: 0 };
+		e.count++;
+		if (t.status === "claimed") e.claimed++;
+		if (t.status === "done") e.done++;
+		map.set(t.epic, e);
+	}
+	return [...map.entries()].map(([name, s]) => ({ name, ...s })).sort((a, b) => b.count - a.count);
 }
 
 export function find(root: string, id: number | string): Task {
@@ -87,11 +103,11 @@ function stamp(path: string, fields: Record<string, string>): void {
 	writeFileSync(path, text);
 }
 
-export function create(root: string, title: string, why: string, deps: number[]): Task {
+export function create(root: string, title: string, why: string, deps: number[], epic = ""): Task {
 	ensure(root);
 	const used = list(root).map((t) => parseInt(t.id, 10));
 	let nid = used.length ? Math.max(...used) + 1 : 1;
-	const text = `---\ntitle: ${title}\nclaimed_by: \nclaimed_at: \ndeps: [${deps.join(", ")}]\ncreated: ${new Date().toISOString()}\n---\n\n## Why\n\n${why}\n\n## Acceptance\n\n- [ ] \n`;
+	const text = `---\ntitle: ${title}\nclaimed_by: \nclaimed_at: \ndeps: [${deps.join(", ")}]\nepic: ${epic}\ncreated: ${new Date().toISOString()}\n---\n\n## Why\n\n${why}\n\n## Acceptance\n\n- [ ] \n`;
 	// ponytail: O_EXCL create is the id race control; a losing racer just bumps.
 	while (true) {
 		const path = join(root, ROOT, "open", `${String(nid).padStart(3, "0")}-${slug(title)}.md`);

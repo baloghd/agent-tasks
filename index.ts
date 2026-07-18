@@ -6,8 +6,7 @@
  * same task. The standing rules below ride in the system prompt via
  * promptGuidelines, so they survive compaction and need no AGENTS.md.
  *
- * Install: copy this directory to .pi/extensions/agent-tasks/ (per project,
- * commit it) or ~/.pi/agent/extensions/agent-tasks/ (global). Auto-discovered.
+ * Install via `pi install git:github.com/baloghd/agent-tasks`.
  */
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
@@ -16,11 +15,12 @@ import { Type } from "typebox";
 import * as core from "./core.ts";
 
 const TaskParams = Type.Object({
-	action: StringEnum(["list", "new", "claim", "drop", "done", "show"] as const),
+	action: StringEnum(["list", "new", "claim", "drop", "done", "show", "epics"] as const),
 	id: Type.Optional(Type.Number({ description: "Task id (claim, drop, done, show)" })),
 	title: Type.Optional(Type.String({ description: "Task title (new)" })),
 	why: Type.Optional(Type.String({ description: "Context for a cold agent: why this matters, file pointers (new)" })),
 	deps: Type.Optional(Type.Array(Type.Number(), { description: "Ids of related/overlapping tasks (new)" })),
+	epic: Type.Optional(Type.String({ description: "Epic/initiative name (new); filter by epic when list; * with list shows all epics" })),
 	status: Type.Optional(StringEnum(["open", "claimed", "done"] as const)),
 	agent: Type.Optional(Type.String({ description: "Your unique handle. Defaults to your session id." })),
 });
@@ -33,7 +33,8 @@ function need(id: number | undefined): number {
 function fmt(t: core.Task): string {
 	const who = t.claimedBy ? ` [${t.claimedBy}]` : "";
 	const deps = t.deps.length ? ` deps:[${t.deps.join(",")}]` : "";
-	return `${t.status.padEnd(8)} #${t.id} ${t.title}${who}${deps}`;
+	const ep = t.epic ? ` (${t.epic})` : "";
+	return `${t.status.padEnd(8)} #${t.id} ${t.title}${who}${deps}${ep}`;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -43,13 +44,15 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Manage project tasks: git-committed markdown files in tasks/, shared by every agent working this repo. " +
 			"Status is the directory (open/claimed/done); claiming is atomic, so parallel agents cannot take the same task. " +
-			"Actions: list (status?), new (title, why?, deps?), claim (id, agent?), drop (id, agent?), done (id, agent?), show (id).",
+			"Actions: list (status?, epic?), new (title, why?, deps?, epic?), claim (id, agent?), drop (id, agent?), done (id, agent?), show (id), epics. " +
+			"Epics: use epic=NAME on any task to group it; list epic=* shows all epics with counts.",
 		promptSnippet: "Track and claim project tasks in tasks/ (git-committed, shared across agents)",
 		promptGuidelines: [
 			"Use the task tool with action list at session start and before starting new work; tasks/ is the shared board for every agent on this repo.",
 			"Claim before you work: task action=claim with your handle. Never start or edit a task claimed by another agent; pick a different one or create a new one.",
 			'Before recommending follow-up work to the user, create each item with task action=new and present the ids. Never ask "should I do a, b or c?" without one task per option.',
 			"When follow-ups overlap, pass the overlapping ids as deps to task action=new and explain the overlap in why, so nobody redoes it.",
+			"Group related tasks under an epic: task action=new with epic=NAME for the parent initiative, then epic=NAME on child tasks. Use task action=epics to see all groups.",
 			"Write task why/acceptance for a cold reader: another agent must be able to pick the task up with zero chat history.",
 			"If scope grows mid-task, create the extra work with task action=new instead of silently expanding the current task.",
 			"Finish with task action=done and reference the task id in your commit message.",
@@ -60,16 +63,21 @@ export default function (pi: ExtensionAPI) {
 			try {
 				switch (params.action) {
 					case "list": {
-						const tasks = core.list(ctx.cwd, params.status);
-						const text = tasks.length ? tasks.map(fmt).join("\n") : "No tasks. Create one with task action=new.";
+						const tasks = core.list(ctx.cwd, params.status, params.epic);
+						const text = tasks.length
+							? tasks.map(fmt).join("\n")
+							: "No tasks. Create one with task action=new.";
 						return { content: [{ type: "text", text }] };
 					}
 					case "new": {
 						if (!params.title) throw new Error("title required for new");
-						const t = core.create(ctx.cwd, params.title, params.why ?? "", params.deps ?? []);
+						const t = core.create(ctx.cwd, params.title, params.why ?? "", params.deps ?? [], params.epic ?? "");
 						return {
 							content: [
-								{ type: "text", text: `Created #${t.id} (${t.file}). Edit ${t.path} to flesh out Why/Acceptance.` },
+								{
+									type: "text",
+									text: `Created #${t.id} (${t.file}). Edit ${t.path} to flesh out Why/Acceptance.`,
+								},
 							],
 						};
 					}
@@ -87,6 +95,18 @@ export default function (pi: ExtensionAPI) {
 					}
 					case "show":
 						return { content: [{ type: "text", text: core.show(ctx.cwd, need(params.id)) }] };
+					case "epics": {
+						const es = core.epics(ctx.cwd);
+						if (!es.length)
+							return { content: [{ type: "text", text: "No epics defined. Use epic=NAME when creating tasks." }] };
+						const text = es
+							.map(
+								(e) =>
+									`${e.name.padEnd(24)} ${e.count} tasks, ${e.claimed} claimed, ${e.done} done`,
+							)
+							.join("\n");
+						return { content: [{ type: "text", text }] };
+					}
 				}
 			} catch (e: any) {
 				return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
@@ -135,8 +155,11 @@ class BoardComponent {
 				lines.push(` ${th.fg("muted", status.toUpperCase())}`);
 				for (const t of group) {
 					let line = `  ${th.fg("accent", `#${t.id}`)} ${t.title}`;
+					if (t.epic) line += th.fg("dim", ` (${t.epic})`);
 					if (t.claimedBy) {
-						const ageH = t.claimedAt ? Math.max(0, Math.round((Date.now() - Date.parse(t.claimedAt)) / 360000) / 10) : 0;
+						const ageH = t.claimedAt
+							? Math.max(0, Math.round((Date.now() - Date.parse(t.claimedAt)) / 360000) / 10)
+							: 0;
 						line += th.fg("muted", ` [${t.claimedBy}, ${ageH}h]`);
 					}
 					if (t.deps.length) line += th.fg("dim", ` deps:[${t.deps.join(",")}]`);
